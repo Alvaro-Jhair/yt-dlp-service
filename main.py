@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import subprocess
 from fastapi import FastAPI, HTTPException
@@ -17,9 +18,9 @@ async def download_subs(req: DownloadSubsRequest):
         cmd = [
             "yt-dlp",
             "--skip-download",
-            "--write-auto-sub",       # subtítulos automáticos
-            "--sub-lang", req.lang,   # idioma (por defecto "es")
-            "--convert-subs", "srt",  # convertir a SRT
+            "--write-auto-sub",
+            "--sub-lang", req.lang,
+            "--convert-subs", "srt",
             "-o", out,
             req.url
         ]
@@ -27,16 +28,31 @@ async def download_subs(req: DownloadSubsRequest):
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=proc.stderr)
 
-        # Buscar el .srt generado
+        # buscamos el .srt generado
         subs_files = [f for f in os.listdir(tmp) if f.endswith(".srt")]
         if not subs_files:
             raise HTTPException(status_code=404, detail="No subtitles found")
 
         path = os.path.join(tmp, subs_files[0])
         with open(path, encoding="utf-8") as f:
-            content = f.read()
+            raw = f.read()
+
+    # limpiamos el SRT: quitamos números de secuencia, timestamps y líneas vacías
+    lines = raw.splitlines()
+    clean_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # descartamos líneas que sólo son números o contienen flechas de timestamp
+        if line.isdigit() or "-->" in line:
+            continue
+        clean_lines.append(line)
+
+    # unimos todo en un solo párrafo (o usa "\n".join(...) si prefieres mantener saltos)
+    clean_text = " ".join(clean_lines)
 
     return {
         "filename": subs_files[0],
-        "content": content
+        "content": clean_text
     }
