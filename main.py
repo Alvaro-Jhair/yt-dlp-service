@@ -1,4 +1,6 @@
-import os, tempfile, subprocess
+import os
+import tempfile
+import subprocess
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -15,18 +17,26 @@ async def download_subs(req: DownloadSubsRequest):
         cmd = [
             "yt-dlp",
             "--skip-download",
-            "--write-subs",
-            "--sub-lang", req.lang,
+            "--write-auto-sub",       # subtítulos automáticos
+            "--sub-lang", req.lang,   # idioma (por defecto "es")
+            "--convert-subs", "srt",  # convertir a SRT
             "-o", out,
             req.url
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=proc.stderr)
-        subs = [f for f in os.listdir(tmp) if f.endswith((".vtt",".srt"))]
-        if not subs:
+
+        # Buscar el .srt generado
+        subs_files = [f for f in os.listdir(tmp) if f.endswith(".srt")]
+        if not subs_files:
             raise HTTPException(status_code=404, detail="No subtitles found")
-        path = os.path.join(tmp, subs[0])
+
+        path = os.path.join(tmp, subs_files[0])
         with open(path, encoding="utf-8") as f:
-            contenido = f.read()
-    return {"filename": subs[0], "content": contenido}
+            content = f.read()
+
+    return {
+        "filename": subs_files[0],
+        "content": content
+    }
