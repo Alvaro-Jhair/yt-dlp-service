@@ -18,43 +18,49 @@ async def download_subs(req: DownloadSubsRequest):
         "writeautomaticsub": True,
         "subtitleslangs": [req.lang],
         "subtitlesformat": "srt",
-        # el template se rellenará tras crear el tempdir
-        "outtmpl": "%(title)s.%(ext)s",
+        "outtmpl": "%(title)s.%(ext)s",  # se ajustará al tempdir
     }
 
-    # directorio temporal para descargar sólo los .srt
+    # directorio temporal para subtítulos
     with tempfile.TemporaryDirectory() as tmp:
         opts["outtmpl"] = os.path.join(tmp, "%(title)s.%(ext)s")
 
-        # extraemos info y generamos los subtítulos
+        # extraemos info y generamos subtítulos
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown")
 
-        # buscamos el .srt generado
-        subs_files = [f for f in os.listdir(tmp) if f.lower().endswith(".srt")]
+        # buscamos archivos .srt o .vtt
+        subs_files = [
+            f for f in os.listdir(tmp)
+            if f.lower().endswith((".srt", ".vtt"))
+        ]
         if not subs_files:
             raise HTTPException(status_code=404, detail="No subtitles found")
         subs_filename = subs_files[0]
         subs_path = os.path.join(tmp, subs_filename)
 
-        # leemos el SRT en bruto
+        # leemos el raw
         try:
             with open(subs_path, encoding="utf-8") as f:
                 raw = f.read()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
 
-    # limpiamos el SRT: quitamos números de secuencia, timestamps y líneas vacías
+    # limpiamos timestamps, números y cabecera WEBVTT
     lines = raw.splitlines()
     clean_lines = []
     for line in lines:
-        line = line.strip()
-        if not line or line.isdigit() or "-->" in line:
+        text = line.strip()
+        if (
+            not text
+            or text.isdigit()
+            or "-->" in text
+            or text.upper().startswith("WEBVTT")
+        ):
             continue
-        clean_lines.append(line)
+        clean_lines.append(text)
 
-    # unimos todo en un solo bloque de texto
     clean_text = " ".join(clean_lines)
 
     return {
