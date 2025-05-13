@@ -46,7 +46,7 @@ async def download_subs(req: DownloadSubsRequest):
             with YoutubeDL(opts) as ydl:
                 ydl.download([req.url])
 
-            subs_files = [f for f in os.listdir(tmp) if f.endswith(".srt")]
+            subs_files = [f for f in os.listdir(tmp) if f.lower().endswith((".srt", ".vtt"))]
             if subs_files:
                 subs_path = os.path.join(tmp, subs_files[0])
                 try:
