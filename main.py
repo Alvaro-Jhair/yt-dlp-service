@@ -1,5 +1,6 @@
 import os
 import tempfile
+import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
@@ -30,14 +31,14 @@ async def download_subs(req: DownloadSubsRequest):
         write_manual = lang in available_subs
 
         if not write_auto and not write_manual:
-            continue  # No está disponible este idioma
+            continue
 
         opts = {
             "skip_download": True,
             "writeautomaticsub": write_auto,
             "writesubtitles": write_manual,
             "subtitleslangs": [lang],
-            "convert_subtitles": "srt",
+            "convert_subtitles": "srt",  # intentará convertir, si ffmpeg está
             "outtmpl": "%(title)s.%(ext)s",
         }
 
@@ -55,11 +56,20 @@ async def download_subs(req: DownloadSubsRequest):
                 except Exception as e:
                     raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
 
-                # Limpiar contenido del .srt
-                lines = raw.splitlines()
+                # Limpieza avanzada del contenido
+                raw_cleaned = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)  # <00:00:02.639>
+                raw_cleaned = re.sub(r"</?c>", "", raw_cleaned)              # <c>...</c>
+                raw_cleaned = re.sub(r"EBVTT.*?\n", "", raw_cleaned)         # encabezado EBVTT
+                raw_cleaned = re.sub(r"\[.*?\]", "", raw_cleaned)            # [Música], etc.
+
+                lines = raw_cleaned.splitlines()
                 clean_lines = [
-                    line.strip() for line in lines
-                    if line.strip() and not line.strip().isdigit() and "-->" not in line
+                    line.strip()
+                    for line in lines
+                    if line.strip()
+                    and not re.match(r"^\d+$", line.strip())                # solo números
+                    and not re.match(r"^\d{2}:\d{2}:\d{2}", line)           # timestamps
+                    and "-->" not in line
                 ]
                 clean_text = " ".join(clean_lines)
 
@@ -70,7 +80,6 @@ async def download_subs(req: DownloadSubsRequest):
                     "content": clean_text
                 }
 
-    # Si no se encontró ningún subtítulo válido
     all_available = sorted(available_subs.union(available_auto))
     raise HTTPException(
         status_code=404,
