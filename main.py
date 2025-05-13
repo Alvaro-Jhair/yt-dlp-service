@@ -32,7 +32,7 @@ async def download_subs(req: DownloadSubsRequest):
         with tempfile.TemporaryDirectory() as tmp:
             opts["outtmpl"] = os.path.join(tmp, "%(title)s.%(ext)s")
             with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(req.url, download=False)
+                info = ydl.extract_info(req.url, download=True)
             title = info.get("title", "unknown").strip()
 
             subs_files = [f for f in os.listdir(tmp) if f.lower().endswith(".srt")]
