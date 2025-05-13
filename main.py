@@ -1,61 +1,67 @@
 import os
-import re
 import tempfile
-import subprocess
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from yt_dlp import YoutubeDL
+
 app = FastAPI()
+
 class DownloadSubsRequest(BaseModel):
     url: str
     lang: str = "es"
+
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
+    # Opciones para yt_dlp: escribimos auto-sub, forzamos conversión a SRT
+    opts = {
+        "skip_download": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": [req.lang],
+        "convert_subtitles": "srt",            # << clave para convertir vtt→srt
+        "outtmpl": "%(title)s.%(ext)s",        # aquí sólo template, lo cambiamos dentro de tmpdir
+    }
+
+    # Directorio temporal
     with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "%(title)s.%(ext)s")
-        cmd = [
-            "yt-dlp",
-            "--skip-download",
-            "--write-auto-sub",       # subtítulos automáticos
-            "--sub-lang", req.lang,   # idioma (por defecto "es")
-            "--convert-subs", "srt",  # convertir a SRT
-            "--write-auto-sub",
-            "--sub-lang", req.lang,
-            "--convert-subs", "srt",
-            "-o", out,
-            req.url
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise HTTPException(status_code=500, detail=proc.stderr)
+        opts["outtmpl"] = os.path.join(tmp, "%(title)s.%(ext)s")
 
-        # Buscar el .srt generado
-        # buscamos el .srt generado
-        subs_files = [f for f in os.listdir(tmp) if f.endswith(".srt")]
+        # Descargamos sólo subtítulos y extraemos metadata
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(req.url, download=False)
+        title = info.get("title", "unknown").strip()
+
+        # Ahora buscamos sólo archivos .srt (ya convertidos)
+        subs_files = [f for f in os.listdir(tmp) if f.lower().endswith(".srt")]
         if not subs_files:
-            raise HTTPException(status_code=404, detail="No subtitles found")
+            # Si no hay SRT, listamos idiomas disponibles para que el usuario lo sepa
+            available = set(
+                list(info.get("subtitles", {}).keys()) +
+                list(info.get("automatic_captions", {}).keys())
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=f"No subtitles found for '{req.lang}'. Available: {', '.join(sorted(available)) or 'none'}"
+            )
 
-        path = os.path.join(tmp, subs_files[0])
-        with open(path, encoding="utf-8") as f:
-            content = f.read()
-            raw = f.read()
+        subs_filename = subs_files[0]
+        subs_path = os.path.join(tmp, subs_filename)
 
-    # limpiamos el SRT: quitamos números de secuencia, timestamps y líneas vacías
+        try:
+            with open(subs_path, encoding="utf-8") as f:
+                raw = f.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
+
+    # Limpiamos SRT: quitamos números, timestamps y líneas vacías
     lines = raw.splitlines()
-    clean_lines = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # descartamos líneas que sólo son números o contienen flechas de timestamp
-        if line.isdigit() or "-->" in line:
-            continue
-        clean_lines.append(line)
-
-    # unimos todo en un solo párrafo (o usa "\n".join(...) si prefieres mantener saltos)
+    clean_lines = [
+        line.strip() for line in lines
+        if line.strip() and not line.strip().isdigit() and "-->" not in line
+    ]
     clean_text = " ".join(clean_lines)
 
     return {
-        "filename": subs_files[0],
-        "content": content
+        "title": title,
+        "filename": subs_filename,
         "content": clean_text
     }
