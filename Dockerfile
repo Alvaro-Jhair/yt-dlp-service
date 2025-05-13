@@ -2,16 +2,25 @@
 
 FROM python:3.11-alpine
 
-# Git es necesario para pip instalar desde el repo
-RUN apk add --no-cache git ffmpeg
-
-# Instalamos FastAPI, Uvicorn y el propio yt-dlp desde GitHub
-RUN pip install \
-    fastapi uvicorn \
-    "git+https://github.com/yt-dlp/yt-dlp.git@master#egg=yt-dlp"
+# Instalamos git, ffmpeg y deps para conversión
+RUN apk add --no-cache \
+      git \
+      ffmpeg \
+      build-base \
+      libffi-dev \
+      openssl-dev
 
 WORKDIR /app
+
+# Copiamos tu aplicación actualizada
 COPY main.py .
 
-# Exponemos el endpoint en el puerto 8000
+# Instalamos FastAPI, Uvicorn y yt-dlp
+RUN pip install --no-cache-dir \
+      fastapi \
+      uvicorn \
+      yt-dlp
+
+EXPOSE 8000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
