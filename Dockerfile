@@ -14,7 +14,9 @@ WORKDIR /app
 
 # Copiamos tu aplicación actualizada
 COPY main.py .
+COPY entrypoint.sh /entrypoint.sh
 
+RUN chmod +x /entrypoint.sh
 # Instalamos FastAPI, Uvicorn y yt-dlp
 RUN pip install --no-cache-dir \
       fastapi \
