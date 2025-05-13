@@ -18,12 +18,24 @@ async def download_subs(req: DownloadSubsRequest):
     elif req.lang == "en":
         fallback_langs = ["en-orig", "en"]
 
-    title = "unknown"
+    # Obtener metadata para ver qué subtítulos existen
+    with YoutubeDL({"quiet": True}) as ydl:
+        info = ydl.extract_info(req.url, download=False)
+        title = info.get("title", "unknown").strip()
+        available_subs = set(info.get("subtitles", {}).keys())
+        available_auto = set(info.get("automatic_captions", {}).keys())
 
     for lang in fallback_langs:
+        write_auto = lang in available_auto
+        write_manual = lang in available_subs
+
+        if not write_auto and not write_manual:
+            continue  # No está disponible este idioma
+
         opts = {
             "skip_download": True,
-            "writeautomaticsub": True,
+            "writeautomaticsub": write_auto,
+            "writesubtitles": write_manual,
             "subtitleslangs": [lang],
             "convert_subtitles": "srt",
             "outtmpl": "%(title)s.%(ext)s",
@@ -32,10 +44,9 @@ async def download_subs(req: DownloadSubsRequest):
         with tempfile.TemporaryDirectory() as tmp:
             opts["outtmpl"] = os.path.join(tmp, "%(title)s.%(ext)s")
             with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(req.url, download=True)
-            title = info.get("title", "unknown").strip()
+                ydl.download([req.url])
 
-            subs_files = [f for f in os.listdir(tmp) if f.lower().endswith(".srt")]
+            subs_files = [f for f in os.listdir(tmp) if f.endswith(".srt")]
             if subs_files:
                 subs_path = os.path.join(tmp, subs_files[0])
                 try:
@@ -44,11 +55,10 @@ async def download_subs(req: DownloadSubsRequest):
                 except Exception as e:
                     raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
 
-                # Limpieza del SRT
+                # Limpiar contenido del .srt
                 lines = raw.splitlines()
                 clean_lines = [
-                    line.strip()
-                    for line in lines
+                    line.strip() for line in lines
                     if line.strip() and not line.strip().isdigit() and "-->" not in line
                 ]
                 clean_text = " ".join(clean_lines)
@@ -60,12 +70,9 @@ async def download_subs(req: DownloadSubsRequest):
                     "content": clean_text
                 }
 
-    # No se encontraron subtítulos
-    available = set(
-        list(info.get("subtitles", {}).keys()) +
-        list(info.get("automatic_captions", {}).keys())
-    )
+    # Si no se encontró ningún subtítulo válido
+    all_available = sorted(available_subs.union(available_auto))
     raise HTTPException(
         status_code=404,
-        detail=f"No subtitles found for '{req.lang}'. Available: {', '.join(sorted(available)) or 'none'}",
+        detail=f"No subtitles found for '{req.lang}'. Available: {', '.join(all_available) or 'none'}",
     )
