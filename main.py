@@ -13,20 +13,32 @@ class DownloadSubsRequest(BaseModel):
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
-    fallback_langs = [req.lang]
-    if req.lang == "es":
-        fallback_langs = ["es-orig", "es"]
-    elif req.lang == "en":
-        fallback_langs = ["en-orig", "en"]
-
-    # Obtener metadata para ver qué subtítulos existen
+    # Obtener metadata para ver qué subtítulos existen y detectar idioma principal
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown").strip()
         available_subs = set(info.get("subtitles", {}).keys())
         available_auto = set(info.get("automatic_captions", {}).keys())
+        video_lang = info.get("language")  # ISO 639-1 si está presente
 
-    for lang in fallback_langs:
+    # Construir lista de idiomas a intentar, priorizando el idioma detectado del vídeo
+    try_langs = []
+    if video_lang:
+        try_langs.append(video_lang)
+    if req.lang not in try_langs:
+        try_langs.append(req.lang)
+    # Añadir fallbacks específicos si el usuario pidió "es" o "en"
+    if req.lang == "es":
+        for l in ["es-orig"]:
+            if l not in try_langs:
+                try_langs.append(l)
+    elif req.lang == "en":
+        for l in ["en-orig"]:
+            if l not in try_langs:
+                try_langs.append(l)
+
+    # Intentar descargar subtítulos en cada idioma de la lista
+    for lang in try_langs:
         write_auto = lang in available_auto
         write_manual = lang in available_subs
 
@@ -38,7 +50,7 @@ async def download_subs(req: DownloadSubsRequest):
             "writeautomaticsub": write_auto,
             "writesubtitles": write_manual,
             "subtitleslangs": [lang],
-            "convert_subtitles": "srt",  # intentará convertir, si ffmpeg está
+            "convert_subtitles": "srt",
             "outtmpl": "%(title)s.%(ext)s",
         }
 
@@ -57,18 +69,18 @@ async def download_subs(req: DownloadSubsRequest):
                     raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
 
                 # Limpieza avanzada del contenido
-                raw_cleaned = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)  # <00:00:02.639>
-                raw_cleaned = re.sub(r"</?c>", "", raw_cleaned)              # <c>...</c>
-                raw_cleaned = re.sub(r"EBVTT.*?\n", "", raw_cleaned)         # encabezado EBVTT
-                raw_cleaned = re.sub(r"\[.*?\]", "", raw_cleaned)            # [Música], etc.
+                raw_cleaned = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)
+                raw_cleaned = re.sub(r"</?c>", "", raw_cleaned)
+                raw_cleaned = re.sub(r"EBVTT.*?\n", "", raw_cleaned)
+                raw_cleaned = re.sub(r"\[.*?\]", "", raw_cleaned)
 
                 lines = raw_cleaned.splitlines()
                 clean_lines = [
                     line.strip()
                     for line in lines
                     if line.strip()
-                    and not re.match(r"^\d+$", line.strip())                # solo números
-                    and not re.match(r"^\d{2}:\d{2}:\d{2}", line)           # timestamps
+                    and not re.match(r"^\d+$", line.strip())
+                    and not re.match(r"^\d{2}:\d{2}:\d{2}", line)
                     and "-->" not in line
                 ]
                 clean_text = " ".join(clean_lines)
@@ -80,8 +92,9 @@ async def download_subs(req: DownloadSubsRequest):
                     "content": clean_text
                 }
 
+    # Si no encontró nada, informar idiomas disponibles
     all_available = sorted(available_subs.union(available_auto))
     raise HTTPException(
         status_code=404,
-        detail=f"No subtitles found for '{req.lang}'. Available: {', '.join(all_available) or 'none'}",
+        detail=f"No subtitles found for requested languages. Available: {', '.join(all_available) or 'none'}",
     )
