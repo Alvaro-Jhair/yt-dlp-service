@@ -10,7 +10,7 @@ app = FastAPI()
 
 class DownloadSubsRequest(BaseModel):
     url: str
-    lang: Optional[str] = None  # Si se deja None, detecta el idioma automáticamente
+    lang: Optional[str] = None  # Si es None, usa auto-captions del idioma hablado
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
@@ -21,51 +21,60 @@ async def download_subs(req: DownloadSubsRequest):
         available_subs: Set[str] = set(info.get("subtitles", {}).keys())
         available_auto: Set[str] = set(info.get("automatic_captions", {}).keys())
 
-    # 2. Determinar idioma a usar: prioridad de auto-captions (idioma hablado), luego manual
+    # 2. Determinar qué descargar y en qué idioma
     if req.lang:
+        # Si el usuario pidió un lang específico, intentamos manual primero
         selected_lang = req.lang
+        download_auto = selected_lang in available_auto
+        download_manual = selected_lang in available_subs
     elif available_auto:
-        # Primer idioma de captions automáticos refleja el idioma hablado
+        # Default: usar auto-captions en idioma hablado
         selected_lang = next(iter(available_auto))
+        download_auto = True
+        download_manual = False
     elif available_subs:
-        # Si no hay auto, usar primer subtítulo manual
+        # Fallback: si no hay auto, usar manual
         selected_lang = next(iter(available_subs))
+        download_auto = False
+        download_manual = True
     else:
         raise HTTPException(
             status_code=404,
             detail="No hay subtítulos disponibles para este vídeo."
         )
 
-    write_auto = selected_lang in available_auto
-    write_manual = selected_lang in available_subs
-    if not (write_auto or write_manual):
+    if not (download_auto or download_manual):
         raise HTTPException(
             status_code=404,
-            detail=f"No se encontraron subtítulos ni automáticos en '{selected_lang}'"
+            detail=(
+                f"No se encontraron subtítulos automáticos ni manuales "
+                f"para el idioma '{selected_lang}'."
+            )
         )
 
-    # 3. Descargar sólo el idioma seleccionado
+    # 3. Construir opciones para yt-dlp
     opts = {
         "skip_download": True,
-        "writesubtitles": write_manual,
-        "writeautomaticsub": write_auto,
-        "subtitleslangs": [selected_lang],
         "convert_subtitles": "srt",
-        # El template se ajustará al directorio temporal
+        "writeautomaticsub": download_auto,   # --write-auto-sub
+        "writesubtitles": download_manual,    # --write-sub
+        # Sólo restringir al idioma elegido:
+        "subtitleslangs": [selected_lang],
         "outtmpl": os.path.join("%(title)s.%(ext)s"),
     }
 
+    # 4. Descargar y procesar subtítulos
     with tempfile.TemporaryDirectory() as tmpdir:
         opts["outtmpl"] = os.path.join(tmpdir, "%(title)s.%(ext)s")
         with YoutubeDL(opts) as ydl:
             ydl.download([req.url])
 
-        # Buscar fichero de subtítulos
+        # Localizar el .srt o .vtt generado
         files = [f for f in os.listdir(tmpdir) if f.lower().endswith((".srt", ".vtt"))]
         if not files:
             raise HTTPException(
                 status_code=500,
-                detail="El proceso de yt-dlp no generó ningún archivo de subtítulos."
+                detail="yt-dlp no generó ningún archivo de subtítulos."
             )
         subtitle_file = files[0]
         subtitle_path = os.path.join(tmpdir, subtitle_file)
