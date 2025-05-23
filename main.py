@@ -1,6 +1,7 @@
 import os
 import tempfile
 import re
+from typing import Optional, List, Set
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
@@ -9,49 +10,65 @@ app = FastAPI()
 
 class DownloadSubsRequest(BaseModel):
     url: str
-    lang: str = "es"
+    lang: Optional[str] = None  # Si no se especifica, se detectará automáticamente
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
-    # Obtener metadata para ver qué subtítulos existen y detectar idioma principal
+    # Extraer metadata de subtítulos y posible idioma del vídeo
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown").strip()
-        available_subs = set(info.get("subtitles", {}).keys())
-        available_auto = set(info.get("automatic_captions", {}).keys())
-        video_lang = info.get("language")  # ISO 639-1 si está presente
+        available_subs: Set[str] = set(info.get("subtitles", {}).keys())
+        available_auto: Set[str] = set(info.get("automatic_captions", {}).keys())
+        video_lang: Optional[str] = info.get("language")  # ISO 639-1 si está presente
 
-    # Construir lista de idiomas a intentar, priorizando el idioma detectado del vídeo
-    try_langs = []
-    if video_lang:
+    all_avail = list(available_subs | available_auto)
+    if not all_avail:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay subtítulos disponibles para este vídeo."
+        )
+
+    # Construir lista de idiomas a intentar
+    try_langs: List[str] = []
+    # 1. Si detectamos idioma del vídeo y hay subtítulos en ese idioma
+    if video_lang and video_lang in all_avail:
         try_langs.append(video_lang)
-    if req.lang not in try_langs:
-        try_langs.append(req.lang)
-    # Añadir fallbacks específicos si el usuario pidió "es" o "en"
-    if req.lang == "es":
-        for l in ["es-orig"]:
-            if l not in try_langs:
-                try_langs.append(l)
-    elif req.lang == "en":
-        for l in ["en-orig"]:
-            if l not in try_langs:
-                try_langs.append(l)
 
-    # Intentar descargar subtítulos en cada idioma de la lista
+    # 2. Si el usuario pidió un idioma específico
+    if req.lang:
+        if req.lang not in try_langs:
+            try_langs.append(req.lang)
+        # Añadir sus posibles variantes de origen
+        if req.lang == "es" and "es-orig" in all_avail and "es-orig" not in try_langs:
+            try_langs.append("es-orig")
+        if req.lang == "en" and "en-orig" in all_avail and "en-orig" not in try_langs:
+            try_langs.append("en-orig")
+
+    # 3. Si no se especificó idioma o tras lo anterior no hay entradas
+    #    y sólo hay un idioma disponible, usarlo
+    if not try_langs and len(all_avail) == 1:
+        try_langs.append(all_avail[0])
+
+    # 4. Finalmente, incluir todos los demás disponibles como último recurso
+    for lang in all_avail:
+        if lang not in try_langs:
+            try_langs.append(lang)
+
+    # Intentar descargar en orden de prioridad
     for lang in try_langs:
-        write_auto = lang in available_auto
         write_manual = lang in available_subs
-
-        if not write_auto and not write_manual:
+        write_auto = lang in available_auto
+        if not (write_manual or write_auto):
             continue
 
         opts = {
             "skip_download": True,
-            "writeautomaticsub": write_auto,
             "writesubtitles": write_manual,
+            "writeautomaticsub": write_auto,
             "subtitleslangs": [lang],
             "convert_subtitles": "srt",
-            "outtmpl": "%(title)s.%(ext)s",
+            "outtmpl": os.path.join("%(title)s.%(ext)s"),
         }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,41 +77,40 @@ async def download_subs(req: DownloadSubsRequest):
                 ydl.download([req.url])
 
             subs_files = [f for f in os.listdir(tmp) if f.lower().endswith((".srt", ".vtt"))]
-            if subs_files:
-                subs_path = os.path.join(tmp, subs_files[0])
-                try:
-                    with open(subs_path, encoding="utf-8") as f:
-                        raw = f.read()
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Error reading subtitle file: {e}")
+            if not subs_files:
+                continue
 
-                # Limpieza avanzada del contenido
-                raw_cleaned = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)
-                raw_cleaned = re.sub(r"</?c>", "", raw_cleaned)
-                raw_cleaned = re.sub(r"EBVTT.*?\n", "", raw_cleaned)
-                raw_cleaned = re.sub(r"\[.*?\]", "", raw_cleaned)
+            subs_path = os.path.join(tmp, subs_files[0])
+            try:
+                with open(subs_path, encoding="utf-8") as f:
+                    raw = f.read()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error al leer subtítulos: {e}")
 
-                lines = raw_cleaned.splitlines()
-                clean_lines = [
-                    line.strip()
-                    for line in lines
-                    if line.strip()
-                    and not re.match(r"^\d+$", line.strip())
-                    and not re.match(r"^\d{2}:\d{2}:\d{2}", line)
-                    and "-->" not in line
-                ]
-                clean_text = " ".join(clean_lines)
+            # Limpieza
+            raw = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)
+            raw = re.sub(r"</?c>", "", raw)
+            raw = re.sub(r"EBVTT.*?\n", "", raw)
+            raw = re.sub(r"\[.*?\]", "", raw)
 
-                return {
-                    "title": title,
-                    "filename": subs_files[0],
-                    "used_lang": lang,
-                    "content": clean_text
-                }
+            lines = raw.splitlines()
+            clean_lines = [
+                ln.strip() for ln in lines
+                if ln.strip()
+                and not re.match(r"^\d+$", ln.strip())
+                and "-->" not in ln
+            ]
+            clean_text = " ".join(clean_lines)
 
-    # Si no encontró nada, informar idiomas disponibles
-    all_available = sorted(available_subs.union(available_auto))
+            return {
+                "title": title,
+                "filename": subs_files[0],
+                "used_lang": lang,
+                "content": clean_text
+            }
+
+    # Si no encontró nada, respondemos con los disponibles
     raise HTTPException(
         status_code=404,
-        detail=f"No subtitles found for requested languages. Available: {', '.join(all_available) or 'none'}",
+        detail=f"No se pudieron descargar subtítulos. Idiomas disponibles: {', '.join(all_avail)}"
     )
