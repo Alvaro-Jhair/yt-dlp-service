@@ -1,7 +1,6 @@
 import os
 import tempfile
 import re
-from typing import Optional, Set
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
@@ -9,82 +8,46 @@ from yt_dlp import YoutubeDL
 app = FastAPI()
 
 class DownloadSubsRequest(BaseModel):
-    url: str
-    lang: Optional[str] = None  # Si es None, usa auto-captions del idioma hablado
+    url: str  # sólo la URL, sin lang
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
-    # 1. Extraer metadata sin descargar vídeo
+    # 1. Extraer sólo el título
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown").strip()
-        available_subs: Set[str] = set(info.get("subtitles", {}).keys())
-        available_auto: Set[str] = set(info.get("automatic_captions", {}).keys())
 
-    # 2. Determinar qué descargar y en qué idioma
-    if req.lang:
-        # Si el usuario pidió un lang específico, intentamos manual primero
-        selected_lang = req.lang
-        download_auto = selected_lang in available_auto
-        download_manual = selected_lang in available_subs
-    elif available_auto:
-        # Default: usar auto-captions en idioma hablado
-        selected_lang = next(iter(available_auto))
-        download_auto = True
-        download_manual = False
-    elif available_subs:
-        # Fallback: si no hay auto, usar manual
-        selected_lang = next(iter(available_subs))
-        download_auto = False
-        download_manual = True
-    else:
-        raise HTTPException(
-            status_code=404,
-            detail="No hay subtítulos disponibles para este vídeo."
-        )
-
-    if not (download_auto or download_manual):
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No se encontraron subtítulos automáticos ni manuales "
-                f"para el idioma '{selected_lang}'."
-            )
-        )
-
-    # 3. Construir opciones para yt-dlp
+    # 2. Opciones fijas: auto-sub en el idioma del vídeo, sin filtrar
     opts = {
-        "skip_download": True,
-        "convert_subtitles": "srt",
-        "writeautomaticsub": download_auto,   # --write-auto-sub
-        "writesubtitles": download_manual,    # --write-sub
-        # Sólo restringir al idioma elegido:
-        "subtitleslangs": [selected_lang],
-        "outtmpl": os.path.join("%(title)s.%(ext)s"),
+        "skip_download": True,         # --skip-download
+        "writeautomaticsub": True,     # --write-auto-sub
+        "convert_subtitles": "srt",    # --convert-subs srt
+        "outtmpl": "%(title)s.%(ext)s"
     }
 
-    # 4. Descargar y procesar subtítulos
+    # 3. Descargar en un tempdir
     with tempfile.TemporaryDirectory() as tmpdir:
         opts["outtmpl"] = os.path.join(tmpdir, "%(title)s.%(ext)s")
         with YoutubeDL(opts) as ydl:
             ydl.download([req.url])
 
-        # Localizar el .srt o .vtt generado
-        files = [f for f in os.listdir(tmpdir) if f.lower().endswith((".srt", ".vtt"))]
-        if not files:
-            raise HTTPException(
-                status_code=500,
-                detail="yt-dlp no generó ningún archivo de subtítulos."
-            )
-        subtitle_file = files[0]
-        subtitle_path = os.path.join(tmpdir, subtitle_file)
+        # 4. Encuentra el .srt generado
+        subs = [f for f in os.listdir(tmpdir) if f.lower().endswith(".srt")]
+        if not subs:
+            raise HTTPException(500, "No se generó ningún .srt.")
+        subtitle_file = subs[0]
 
-        # Leer y limpiar contenido
+        # 5. Derivar el código de idioma si viene en el nombre (p.ej. "video.en.srt")
+        parts = subtitle_file.rsplit(".", 2)
+        used_lang = parts[1] if len(parts) == 3 else None
+
+        path = os.path.join(tmpdir, subtitle_file)
         try:
-            raw = open(subtitle_path, encoding="utf-8").read()
+            raw = open(path, encoding="utf-8").read()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error al leer el archivo: {e}")
+            raise HTTPException(500, f"Error al leer subtítulo: {e}")
 
+        # 6. Limpieza básica del texto
         clean = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)
         clean = re.sub(r"</?c>", "", clean)
         clean = re.sub(r"EBVTT.*?\n", "", clean)
@@ -99,6 +62,6 @@ async def download_subs(req: DownloadSubsRequest):
         return {
             "title": title,
             "filename": subtitle_file,
-            "used_lang": selected_lang,
+            "used_lang": used_lang,
             "content": content
         }
