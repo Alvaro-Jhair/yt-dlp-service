@@ -8,46 +8,53 @@ from yt_dlp import YoutubeDL
 app = FastAPI()
 
 class DownloadSubsRequest(BaseModel):
-    url: str  # sólo la URL, sin lang
+    url: str  # sólo la URL
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
-    # 1. Extraer sólo el título
+    # 1. Extraer metadata (sólo título)
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown").strip()
 
-    # 2. Opciones fijas: auto-sub en el idioma del vídeo, sin filtrar
+    # 2. Opciones fijas: auto-sub sin filtrar idioma
     opts = {
-        "skip_download": True,         # --skip-download
-        "writeautomaticsub": True,     # --write-auto-sub
-        "convert_subtitles": "srt",    # --convert-subs srt
+        "skip_download": True,      # --skip-download
+        "writeautomaticsub": True,  # --write-auto-sub
+        # NOTA: eliminamos convert_subtitles porque a veces no convierte auto-vtt
         "outtmpl": "%(title)s.%(ext)s"
     }
 
-    # 3. Descargar en un tempdir
+    # 3. Descargar dentro de un tempdir
     with tempfile.TemporaryDirectory() as tmpdir:
         opts["outtmpl"] = os.path.join(tmpdir, "%(title)s.%(ext)s")
         with YoutubeDL(opts) as ydl:
             ydl.download([req.url])
 
-        # 4. Encuentra el .srt generado
-        subs = [f for f in os.listdir(tmpdir) if f.lower().endswith(".srt")]
-        if not subs:
-            raise HTTPException(500, "No se generó ningún .srt.")
-        subtitle_file = subs[0]
+        # 4. Buscar tanto .vtt como .srt
+        files = [
+            f for f in os.listdir(tmpdir)
+            if f.lower().endswith((".srt", ".vtt"))
+        ]
+        if not files:
+            raise HTTPException(
+                status_code=500,
+                detail="No se generó ningún archivo de subtítulos (.srt ni .vtt)."
+            )
 
-        # 5. Derivar el código de idioma si viene en el nombre (p.ej. "video.en.srt")
+        subtitle_file = files[0]
+        subtitle_path = os.path.join(tmpdir, subtitle_file)
+
+        # 5. Extraer el código de idioma si viene en el nombre (p.ej. "... .en.vtt")
         parts = subtitle_file.rsplit(".", 2)
         used_lang = parts[1] if len(parts) == 3 else None
 
-        path = os.path.join(tmpdir, subtitle_file)
+        # 6. Leer y limpiar el contenido
         try:
-            raw = open(path, encoding="utf-8").read()
+            raw = open(subtitle_path, encoding="utf-8").read()
         except Exception as e:
-            raise HTTPException(500, f"Error al leer subtítulo: {e}")
+            raise HTTPException(status_code=500, detail=f"Error al leer el archivo: {e}")
 
-        # 6. Limpieza básica del texto
         clean = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", "", raw)
         clean = re.sub(r"</?c>", "", clean)
         clean = re.sub(r"EBVTT.*?\n", "", clean)
