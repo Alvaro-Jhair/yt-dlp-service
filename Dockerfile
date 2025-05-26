@@ -12,16 +12,17 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-# Copiamos tu aplicación actualizada
+# Copiamos tu aplicación
 COPY main.py .
 COPY entrypoint.sh /entrypoint.sh
-
 RUN chmod +x /entrypoint.sh
-# Instalamos FastAPI, Uvicorn y yt-dlp
+
+# Instalamos FastAPI, Uvicorn, yt-dlp y langdetect
 RUN pip install --no-cache-dir \
       fastapi \
       uvicorn \
-      yt-dlp
+      yt-dlp \
+      langdetect
 
 EXPOSE 8000
 
