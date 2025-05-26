@@ -4,24 +4,40 @@ import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
+from langdetect import detect, DetectorFactory
+from typing import Optional
+
+# Aseguramos reproducibilidad en langdetect
+DetectorFactory.seed = 0
 
 app = FastAPI()
 
 class DownloadSubsRequest(BaseModel):
-    url: str  # sólo la URL
+    url: str                 # URL del vídeo
+    idioma: Optional[str]    # Código ISO 639-1 del idioma deseado
 
 @app.post("/download_subs")
 async def download_subs(req: DownloadSubsRequest):
-    # 1. Extraer metadata (sólo título)
+    # 1. Extraer metadata (título y posible idioma del vídeo)
     with YoutubeDL({"quiet": True}) as ydl:
         info = ydl.extract_info(req.url, download=False)
         title = info.get("title", "unknown").strip()
+        video_lang = info.get("language")
 
-    # 2. Opciones fijas: auto-sub sin filtrar idioma
+    # 1.1 Fallback: si no hay video_lang, lo detectamos sobre el título
+    if not video_lang:
+        try:
+            video_lang = detect(title)
+        except Exception:
+            video_lang = None
+
+    # 2. Opciones de descarga: sólo subtítulos automáticos en el idioma solicitado
     opts = {
-        "skip_download": True,      # --skip-download
-        "writeautomaticsub": True,  # --write-auto-sub
-        # NOTA: eliminamos convert_subtitles porque a veces no convierte auto-vtt
+        "skip_download": True,         # --skip-download
+        "writeautomaticsub": True,     # --write-auto-sub
+        # Filtramos por el idioma que vino en la petición
+        # Si no vino, dejamos que baje cualquier auto-sub disponible
+        **({"subtitleslangs": [req.idioma]} if req.idioma else {}),
         "outtmpl": "%(title)s.%(ext)s"
     }
 
@@ -31,7 +47,7 @@ async def download_subs(req: DownloadSubsRequest):
         with YoutubeDL(opts) as ydl:
             ydl.download([req.url])
 
-        # 4. Buscar tanto .vtt como .srt
+        # 4. Buscar tanto .vtt como .srt en el directorio
         files = [
             f for f in os.listdir(tmpdir)
             if f.lower().endswith((".srt", ".vtt"))
@@ -45,7 +61,7 @@ async def download_subs(req: DownloadSubsRequest):
         subtitle_file = files[0]
         subtitle_path = os.path.join(tmpdir, subtitle_file)
 
-        # 5. Extraer el código de idioma si viene en el nombre (p.ej. "... .en.vtt")
+        # 5. Extraer el código de idioma del nombre del archivo (p.ej. "... .es.vtt")
         parts = subtitle_file.rsplit(".", 2)
         used_lang = parts[1] if len(parts) == 3 else None
 
@@ -67,8 +83,10 @@ async def download_subs(req: DownloadSubsRequest):
         content = " ".join(filtered)
 
         return {
-            "title": title,
-            "filename": subtitle_file,
-            "used_lang": used_lang,
-            "content": content
+            "title":       title,
+            "filename":    subtitle_file,
+            "requested":   req.idioma,
+            "used_lang":   used_lang,
+            "video_lang":  video_lang,
+            "content":     content
         }
