@@ -12,42 +12,35 @@ DetectorFactory.seed = 0
 
 app = FastAPI()
 
-class TitleRequest(BaseModel):
-    url: str  # URL del vídeo o noticia
-
 class SubsRequest(BaseModel):
-    url: str          # URL del vídeo
-    idioma: str       # Código ISO 639-1 del idioma deseado
-
-@app.post("/extract_title")
-async def extract_title(req: TitleRequest):
-    """
-    Extrae el título y el posible idioma del vídeo sin descargar nada.
-    """
-    with YoutubeDL({"quiet": True}) as ydl:
-        info = ydl.extract_info(req.url, download=False)
-        title = info.get("title", "unknown").strip()
-        video_lang = info.get("language")
-
-    # Fallback: detectamos idioma del título si no viene en metadata
-    if not video_lang:
-        try:
-            video_lang = detect(title)
-        except Exception:
-            video_lang = None
-
-    return {"title": title, "video_lang": video_lang}
+    url: str                 # URL del vídeo o noticia
+    idioma: Optional[str] = None  # Código ISO 639-1 del idioma deseado (opcional)
 
 @app.post("/download_subs")
 async def download_subs(req: SubsRequest):
     """
-    Descarga sólo subtítulos automáticos en el idioma solicitado.
+    Si no se especifica 'idioma', extrae el título y posible idioma del vídeo.
+    Si se especifica, descarga subtítulos automáticos en ese idioma.
     """
-    # Opciones de descarga: sólo subtítulos automáticos
+    # Caso 1: solo URL -> extraer título e idioma
+    if not req.idioma:
+        with YoutubeDL({"quiet": True}) as ydl:
+            info = ydl.extract_info(req.url, download=False)
+            title = info.get("title", "unknown").strip()
+            video_lang = info.get("language")
+        # Fallback: detectar idioma del título
+        if not video_lang:
+            try:
+                video_lang = detect(title)
+            except Exception:
+                video_lang = None
+        return {"title": title, "video_lang": video_lang}
+
+    # Caso 2: descargar subtítulos en el idioma solicitado
     opts = {
-        "skip_download": True,         # --skip-download
-        "writeautomaticsub": True,     # --write-auto-sub
-        "subtitleslangs": [req.idioma],# Filtrar por idioma
+        "skip_download": True,       # --skip-download
+        "writeautomaticsub": True,   # --write-auto-sub
+        "subtitleslangs": [req.idioma],  # Filtrar por idioma
         "outtmpl": "%(_title_)s.%(ext)s"
     }
 
